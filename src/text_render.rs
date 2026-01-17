@@ -10,8 +10,8 @@ use wgpu_text::{
     },
 };
 
-const FONT_SIZE: f32 = 17.0;
-const FONT_SIZE_SMALL: f32 = 14.0;
+const FONT_SIZE: f32 = 16.0;
+const FONT_SIZE_SMALL: f32 = 13.0;
 
 pub struct TextRenderer {
     brush: TextBrush<FontArc>,
@@ -61,7 +61,7 @@ impl TextRenderer {
             .trim();
 
         let top_y = PANEL_START + (CONFIG.height * 0.26).floor();
-        let bottom_y = PANEL_START + (CONFIG.height * 0.57).floor();
+        let bottom_y = PANEL_START + (CONFIG.height * 0.75).floor();
 
         let measure_layout = Layout::SingleLine {
             line_breaker: BuiltInLineBreaker::AnyCharLineBreaker,

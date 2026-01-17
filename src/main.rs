@@ -24,8 +24,8 @@ mod text_render;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const PANEL_START: f32 = 6.0;
-const PANEL_EXTENSION: f32 = 12.0;
+const PANEL_START: f32 = 2.0;
+const PANEL_EXTENSION: f32 = 4.0;
 
 struct GpuResources {
     device: Device,

@@ -100,7 +100,7 @@ pub fn run() {
         }
     });
     layer_surface.set_margin(0, 0, 0, 0);
-    layer_surface.set_exclusive_zone(-1);
+    layer_surface.set_exclusive_zone((CONFIG.height + PANEL_START) as i32);
 
     surface.commit();
     connection.flush().expect("Failed to flush initial commit");
