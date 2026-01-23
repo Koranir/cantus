@@ -362,8 +362,10 @@ impl CantusApp {
             .unwrap_or_default();
         self.background_pills.push(BackgroundPill {
             rect: [start_x, width],
-            colors: ALBUM_PALETTE_CACHE
-                .get(&track.album.id)
+            colors: track
+                .album
+                .id
+                .and_then(|id| ALBUM_PALETTE_CACHE.get(&id))
                 .and_then(|data_ref| data_ref.as_ref().copied())
                 .unwrap_or_default(),
             alpha: fade_alpha,
@@ -397,8 +399,10 @@ impl CantusApp {
         avg_speed: f32,
         volume: Option<u8>,
     ) {
-        let palette = ALBUM_PALETTE_CACHE
-            .get(&track.album.id)
+        let palette = track
+            .album
+            .id
+            .and_then(|id| ALBUM_PALETTE_CACHE.get(&id))
             .and_then(|data_ref| data_ref.as_ref().copied())
             .unwrap_or_default();
 
@@ -441,6 +445,7 @@ impl CantusApp {
 
         // Playhead
         let interaction = &mut self.interaction;
+        self.playhead_info.volume = f32::from(volume.unwrap_or(100)) / 100.0;
         let playbutton_hsize = CONFIG.height * 0.25;
         let speed = 2.2 * dt;
         interaction.play_hitbox = Rect::new(
@@ -458,7 +463,7 @@ impl CantusApp {
         // Determine the intended state for the bar
         let bar_target =
             u32::from(playhead_hovered || !interaction.playing || last_toggle < 1.0) as f32;
-        move_towards(&mut interaction.playhead_bar, bar_target, speed);
+        move_towards(&mut self.playhead_info.bar_lerp, bar_target, speed);
 
         // Determine which icon (if any) is currently active
         let (mut play_active, mut pause_active) = (false, false);
@@ -471,14 +476,14 @@ impl CantusApp {
         } else if !interaction.playing {
             pause_active = true;
         } else if interaction.playing && last_toggle < 1.0 {
-            interaction.playhead_play = last_toggle; // Hard set for the "start" animation
+            self.playhead_info.play_lerp = last_toggle; // Hard set for the "start" animation
             play_active = true;
         }
 
         // If active, move toward 0.5. If inactive, finish the animation to 1.0 then reset to 0.0.
         for (val, is_active) in [
-            (&mut interaction.playhead_play, play_active),
-            (&mut interaction.playhead_pause, pause_active),
+            (&mut self.playhead_info.play_lerp, play_active),
+            (&mut self.playhead_info.pause_lerp, pause_active),
         ] {
             if is_active {
                 move_towards(val, 0.5, speed);
@@ -489,13 +494,6 @@ impl CantusApp {
                 }
             }
         }
-
-        self.playhead_info = PlayheadUniforms {
-            volume: f32::from(volume.unwrap_or(100)) / 100.0,
-            bar_lerp: interaction.playhead_bar,
-            play_lerp: interaction.playhead_play,
-            pause_lerp: interaction.playhead_pause,
-        };
     }
 }
 
@@ -560,7 +558,9 @@ fn convert_to_swatches(centroids: &[palette::Lab]) -> Vec<[u8; 3]> {
 /// Gathers the 4 primary colours for each album image.
 pub fn update_color_palettes() {
     for track in &PLAYBACK_STATE.read().queue {
-        if ALBUM_PALETTE_CACHE.contains_key(&track.album.id) {
+        let album_id = track.album.id.unwrap_or_default();
+        let artist_id = track.artist.id.unwrap_or_default();
+        if ALBUM_PALETTE_CACHE.contains_key(&album_id) {
             continue;
         }
 
@@ -570,14 +570,14 @@ pub fn update_color_palettes() {
         let Some(album_image) = image_ref.as_ref() else {
             continue;
         };
-        ALBUM_PALETTE_CACHE.insert(track.album.id, None);
+        ALBUM_PALETTE_CACHE.insert(album_id, None);
 
         let (album_pixels, album_is_colourful) = extract_lab_pixels(album_image);
         let mut result = do_kmeans(&album_pixels);
 
         if !album_is_colourful {
             let artist_img = ARTIST_DATA_CACHE
-                .get(&track.artist.id)
+                .get(&artist_id)
                 .and_then(|e| e.value().clone())
                 .and_then(|url| IMAGES_CACHE.get(&url))
                 .and_then(|img| img.as_ref().cloned());
@@ -588,7 +588,7 @@ pub fn update_color_palettes() {
                     result = do_kmeans(&artist_pixels);
                 }
             } else {
-                ALBUM_PALETTE_CACHE.remove(&track.album.id);
+                ALBUM_PALETTE_CACHE.remove(&album_id);
                 continue;
             }
         }
@@ -599,7 +599,7 @@ pub fn update_color_palettes() {
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], 255]))
             .collect::<Vec<_>>()
             .try_into()
-            .expect("Result should have exactly 4 colors");
-        ALBUM_PALETTE_CACHE.insert(track.album.id, Some(primary_colors));
+            .unwrap_or_default();
+        ALBUM_PALETTE_CACHE.insert(album_id, Some(primary_colors));
     }
 }
