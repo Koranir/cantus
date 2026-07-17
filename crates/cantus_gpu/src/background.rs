@@ -278,17 +278,21 @@ pub fn fs_background(
     );
 
     // Sharp cover art at the trailing edge.
-    let image_left = pill_size.x - pill_size.y;
-    if pill.image_index >= 0 && local_pixel.x >= image_left {
-        let uv_img = vec2((local_pixel.x - image_left) / pill_size.y, stretched_uv_y);
+    let image_half_size = pill_size.y * 0.5;
+    let image_center = vec2(pill_size.x - image_half_size, image_half_size);
+    let image_local = local_pixel - image_center;
+    if pill.image_index >= 0 && image_local.x >= -image_half_size {
+        // Define the artwork entirely in the pill's undeformed pixel space.
+        // Neither its sampling coordinates nor its mask follow the bulge.
+        let uv_img = image_local / pill_size.y + 0.5;
         let tex = images.sample(*sampler, uv_img.extend(pill.image_index as f32));
         let img_mask = 1.0
             - smoothstep(
                 -0.5,
                 0.5,
                 sd_squircle(
-                    (uv_img - 0.5) * pill_size.y,
-                    Vec2::splat(pill_size.y * 0.5),
+                    image_local,
+                    Vec2::splat(image_half_size),
                     pill_corner_radius,
                 ),
             );
