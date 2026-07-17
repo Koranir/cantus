@@ -550,10 +550,8 @@ impl CantusApp {
             flag(show_details),
             dt / DETAIL_FADE_DURATION,
         );
-        if show_details {
-            track.runtime.marquee_time += dt;
-        } else {
-            track.runtime.marquee_time = 0.0;
+        if !show_details {
+            track.runtime.reset_marquee();
         }
         let detail_alpha = track.runtime.detail_alpha;
         approach(
@@ -588,6 +586,7 @@ impl CantusApp {
                 track,
                 detail_alpha,
                 show_album_art,
+                dt,
                 self.render.scale,
             );
         }

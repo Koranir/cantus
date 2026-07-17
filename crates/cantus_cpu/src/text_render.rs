@@ -1,4 +1,7 @@
-use crate::{PANEL_START, model::Track};
+use crate::{
+    PANEL_START,
+    model::{MarqueePhase, MarqueeRuntime, Track},
+};
 use ab_glyph::{Font, FontArc, Glyph, GlyphId, PxScale, ScaleFont, point};
 use cantus_shared::{GLYPH_ATLAS_SIZE, GlyphInstance, MAX_GLYPH_INSTANCES, pack_u16x2};
 use glam::{Vec2, vec2};
@@ -155,9 +158,10 @@ impl TextRenderer {
     pub fn render(
         &mut self,
         queue: &Queue,
-        track: &Track,
+        track: &mut Track,
         alpha: f32,
         show_album_art: bool,
+        dt: f32,
         render_scale: f32,
     ) {
         let text_padding = text_padding(track.runtime.width);
@@ -171,6 +175,7 @@ impl TextRenderer {
         let available_width = text_start_right - text_start_left;
 
         if available_width <= 0.0 {
+            track.runtime.reset_marquee();
             return;
         }
 
@@ -198,7 +203,7 @@ impl TextRenderer {
 
         let title_overflow = (measured_width - available_width).max(0.0);
         let (x, align, clip) = if title_overflow > 0.0 {
-            let offset = marquee_offset(track.runtime.marquee_time, title_overflow);
+            let offset = update_marquee(&mut track.runtime.marquee, title_overflow, dt);
             let clip_left = if offset > 0.5 {
                 text_start_left
             } else {
@@ -214,6 +219,7 @@ impl TextRenderer {
                 )),
             )
         } else {
+            track.runtime.reset_marquee();
             (text_start_right, Align::Right, None)
         };
 
@@ -359,25 +365,54 @@ impl TextRenderer {
     }
 }
 
-fn marquee_offset(elapsed: f32, overflow: f32) -> f32 {
-    if overflow <= 0.0 {
-        return 0.0;
-    }
+fn update_marquee(runtime: &mut MarqueeRuntime, extent: f32, dt: f32) -> f32 {
+    runtime.elapsed += dt.clamp(0.0, 0.1);
 
-    let travel_time = overflow / MARQUEE_SPEED;
-    let cycle = MARQUEE_PAUSE * 2.0 + travel_time * 2.0;
-    let phase = elapsed.rem_euclid(cycle);
-    if phase < MARQUEE_PAUSE {
-        0.0
-    } else if phase < MARQUEE_PAUSE + travel_time {
-        let progress = (phase - MARQUEE_PAUSE) / travel_time;
-        overflow * ease_in_out(progress)
-    } else if phase < MARQUEE_PAUSE * 2.0 + travel_time {
-        overflow
-    } else {
-        let progress = (phase - MARQUEE_PAUSE * 2.0 - travel_time) / travel_time;
-        overflow * (1.0 - ease_in_out(progress))
+    match runtime.phase {
+        MarqueePhase::StartPause => {
+            runtime.start = extent;
+            if runtime.elapsed >= MARQUEE_PAUSE {
+                runtime.phase = MarqueePhase::Forward;
+                runtime.elapsed = 0.0;
+            }
+            0.0
+        }
+        MarqueePhase::Forward => {
+            let progress = (runtime.elapsed / travel_duration(runtime.start)).min(1.0);
+            let remaining = runtime.start * (1.0 - ease_in_out(progress));
+            let offset = (extent - remaining).clamp(0.0, extent);
+            if progress >= 1.0 {
+                runtime.phase = MarqueePhase::EndPause;
+                runtime.elapsed = 0.0;
+            }
+            offset
+        }
+        MarqueePhase::EndPause => {
+            let offset = extent;
+            if runtime.elapsed >= MARQUEE_PAUSE {
+                runtime.phase = MarqueePhase::Backward;
+                runtime.elapsed = 0.0;
+                runtime.start = offset;
+            }
+            offset
+        }
+        MarqueePhase::Backward => {
+            let progress = (runtime.elapsed / travel_duration(runtime.start)).min(1.0);
+            let offset = runtime.start * (1.0 - ease_in_out(progress));
+            if progress >= 1.0 {
+                runtime.phase = MarqueePhase::StartPause;
+                runtime.elapsed = 0.0;
+                runtime.start = extent;
+            }
+            offset.min(extent)
+        }
     }
+}
+
+fn travel_duration(distance: f32) -> f32 {
+    // Cubic easing peaks at 1.5x its average velocity, so scale the
+    // duration to keep the requested marquee speed as the actual maximum.
+    (distance * 1.5 / MARQUEE_SPEED).max(0.001)
 }
 
 fn ease_in_out(progress: f32) -> f32 {
@@ -444,26 +479,55 @@ mod tests {
     }
 
     #[test]
-    fn marquee_pauses_and_scrolls_in_both_directions() {
-        let overflow = 48.0;
-        let travel_time = overflow / MARQUEE_SPEED;
-        let close_to = |actual: f32, expected: f32| {
-            assert!((actual - expected).abs() < 0.001);
+    fn marquee_uses_a_gentle_easing_curve() {
+        let distance = 48.0;
+        let mut runtime = MarqueeRuntime {
+            phase: MarqueePhase::Forward,
+            elapsed: travel_duration(distance) * 0.25,
+            start: distance,
         };
 
-        close_to(marquee_offset(0.0, overflow), 0.0);
-        close_to(
-            marquee_offset(MARQUEE_PAUSE + travel_time / 2.0, overflow),
-            overflow / 2.0,
-        );
-        close_to(
-            marquee_offset(MARQUEE_PAUSE + travel_time + 0.5, overflow),
-            overflow,
-        );
-        close_to(
-            marquee_offset(MARQUEE_PAUSE * 2.0 + travel_time * 1.5, overflow),
-            overflow / 2.0,
-        );
-        assert!(marquee_offset(MARQUEE_PAUSE + travel_time * 0.25, overflow) < overflow * 0.25);
+        let offset = update_marquee(&mut runtime, distance, 0.0);
+
+        assert!(offset < distance * 0.25);
+    }
+
+    #[test]
+    fn marquee_speed_stays_below_the_limit() {
+        let distance = 48.0;
+        let mut runtime = MarqueeRuntime {
+            phase: MarqueePhase::Forward,
+            start: distance,
+            ..Default::default()
+        };
+        let mut previous_offset = 0.0;
+
+        for _ in 0..1_000 {
+            let offset = update_marquee(&mut runtime, distance, 0.01);
+            assert!((offset - previous_offset).abs() <= MARQUEE_SPEED * 0.01 + 0.001);
+            previous_offset = offset;
+        }
+    }
+
+    #[test]
+    fn marquee_returns_when_the_visible_range_keeps_growing() {
+        let mut runtime = MarqueeRuntime::default();
+        let mut reached_end = false;
+        let mut returned_to_start = false;
+
+        for frame in 0..8_000 {
+            let extent = 48.0 + frame as f32 * 0.1;
+            let offset = update_marquee(&mut runtime, extent, 0.01);
+            if runtime.phase == MarqueePhase::EndPause {
+                reached_end = true;
+                assert!((offset - extent).abs() < f32::EPSILON);
+            }
+            returned_to_start |= reached_end
+                && runtime.phase == MarqueePhase::StartPause
+                && offset.abs() < f32::EPSILON;
+        }
+
+        assert!(reached_end);
+        assert!(returned_to_start);
     }
 }
