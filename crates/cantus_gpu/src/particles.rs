@@ -38,7 +38,7 @@ pub fn vs_particles(
     let luma = rgb.dot(vec3(0.299, 0.587, 0.114));
     let spark_color = Vec3::splat(luma).lerp(rgb, 2.0).lerp(Vec3::ONE, 0.2) * 2.0;
 
-    *out_pos = pixel_to_ndc(world_pos, global.screen_size);
+    *out_pos = pixel_to_ndc(world_pos + global.content_offset, global.screen_size);
     *out_color = spark_color.extend((1.0 - p_life) * smoothstep(0.0, 0.15, dt) * 0.3);
     *out_uv = uv;
 }

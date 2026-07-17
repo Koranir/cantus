@@ -26,7 +26,7 @@ pub fn vs_playhead(
         global.bar_height.x - 5.0 + uv.y * (height + 10.0),
     );
 
-    *out_pos = pixel_to_ndc(world_pos, global.screen_size);
+    *out_pos = pixel_to_ndc(world_pos + global.content_offset, global.screen_size);
     *out_world_pos = world_pos;
 }
 

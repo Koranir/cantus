@@ -240,6 +240,10 @@ impl Rect {
     pub fn contains(self, point: Vec2) -> bool {
         point.x >= self.x0 && point.x <= self.x1 && point.y >= self.y0 && point.y <= self.y1
     }
+
+    pub fn translated_y(self, offset: f32) -> Self {
+        Self::new(self.x0, self.y0 + offset, self.x1, self.y1 + offset)
+    }
 }
 
 pub fn deserialize_images<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>

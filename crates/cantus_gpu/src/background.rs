@@ -109,7 +109,7 @@ pub fn vs_background(
     );
 
     let pixel_pos = render_min + unit_coord * (render_max - render_min);
-    *out_pos = pixel_to_ndc(pixel_pos, global.screen_size);
+    *out_pos = pixel_to_ndc(pixel_pos + global.content_offset, global.screen_size);
     *out_pixel_pos = pixel_pos;
     *out_pill_idx = i_idx;
 }

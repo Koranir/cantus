@@ -27,7 +27,7 @@ pub fn vs_text(
     let atlas_min = unpack_u16x2(glyph.atlas[0]);
     let atlas_max = unpack_u16x2(glyph.atlas[1]);
 
-    *out_pos = pixel_to_ndc(pixel_pos, global.screen_size);
+    *out_pos = pixel_to_ndc(pixel_pos + global.content_offset, global.screen_size);
     *out_uv = (atlas_min + unit * (atlas_max - atlas_min)) / GLYPH_ATLAS_SIZE as f32;
     *out_fade = Vec2::new(glyph.clip_right - pixel_pos.x, glyph.alpha);
 }

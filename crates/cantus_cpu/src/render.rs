@@ -2,7 +2,7 @@ use crate::{
     CantusApp, MAX_RENDER_INSTANCES, PANEL_EXTENSION, PANEL_START, PARTICLE_COUNT,
     TRACK_SPACING_MS,
     art::{AlbumArt, ArtState},
-    config::Config,
+    config::{Config, LayerAnchor},
     model::{AudioFeatures, CondensedPlaylist, Rect, Track, playlist_icons},
     pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES},
     text_render::TextRenderer,
@@ -202,6 +202,8 @@ pub struct RenderState {
     /// Physical buffer pixels per logical Wayland surface pixel.
     pub scale: f32,
     pub surface_width: Option<f32>,
+    pub surface_mouse_pos: Vec2,
+    pub auto_hide_requested: bool,
     pub uniforms: GlobalUniforms,
     pub pills: Vec<BackgroundPill>,
     pub playhead: PlayheadUniforms,
@@ -221,6 +223,8 @@ impl Default for RenderState {
             particles_accumulator: 0.0,
             scale: 1.0,
             surface_width: None,
+            surface_mouse_pos: Vec2::ZERO,
+            auto_hide_requested: false,
             uniforms: GlobalUniforms::default(),
             pills: Vec::with_capacity(MAX_RENDER_INSTANCES),
             playhead: PlayheadUniforms::default(),
@@ -371,6 +375,24 @@ impl CantusApp {
             .as_secs_f32()
             .min(0.1);
         self.render.last_update = now;
+
+        let hide_direction = match self.config.layer_anchor {
+            LayerAnchor::Top => -1.0,
+            LayerAnchor::Bottom => 1.0,
+        };
+        let surface_height = self.logical_surface_size().1;
+        let hide_target = if self.config.auto_hide && self.render.auto_hide_requested {
+            hide_direction * surface_height
+        } else {
+            0.0
+        };
+        approach(
+            &mut self.render.uniforms.content_offset.y,
+            hide_target,
+            surface_height * 7.0 * dt,
+        );
+        self.render.uniforms.mouse_pos =
+            self.render.surface_mouse_pos - self.render.uniforms.content_offset;
 
         let px_per_ms = self.config.px_per_ms();
         let playhead_x = self.config.playhead_x();

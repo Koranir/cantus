@@ -34,6 +34,13 @@ pub struct Config {
     pub playlists: ArrayVec<String, MAX_PILL_PLAYLIST_ICONS>,
     /// Whether star ratings should be enabled.
     pub ratings_enabled: bool,
+
+    /// Hide the bar when the pointer enters it.
+    pub auto_hide: bool,
+    /// Time to wait before hiding the bar, in milliseconds.
+    pub auto_hide_delay_ms: u64,
+    /// XKB modifier name which keeps the bar visible while held.
+    pub auto_hide_modifier: String,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -66,6 +73,9 @@ impl Default for Config {
             history_width: 100.0,
             playlists: ArrayVec::new(),
             ratings_enabled: false,
+            auto_hide: false,
+            auto_hide_delay_ms: 800,
+            auto_hide_modifier: "Control".into(),
         }
     }
 }
@@ -114,5 +124,33 @@ impl Config {
 
     pub fn playhead_x(&self) -> f32 {
         self.history_width - self.timeline_start_ms() * self.px_per_ms()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn auto_hide_defaults_are_backwards_compatible() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(!config.auto_hide);
+        assert_eq!(config.auto_hide_delay_ms, 400);
+        assert_eq!(config.auto_hide_modifier, "Control");
+    }
+
+    #[test]
+    fn auto_hide_settings_can_be_overridden() {
+        let config: Config = toml::from_str(
+            r#"
+                auto_hide = true
+                auto_hide_delay_ms = 750
+                auto_hide_modifier = "Mod4"
+            "#,
+        )
+        .unwrap();
+        assert!(config.auto_hide);
+        assert_eq!(config.auto_hide_delay_ms, 750);
+        assert_eq!(config.auto_hide_modifier, "Mod4");
     }
 }

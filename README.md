@@ -46,9 +46,18 @@ programs.cantus = {
     history_width = 100.0;
     playlists = [ "Rock & Roll" "Instrumental" "Pop" ];
     ratings_enabled = true;
+    auto_hide = true;
+    auto_hide_delay_ms = 400;
+    auto_hide_modifier = "Control";
   };
 };
 ```
+
+With `auto_hide` enabled, the bar contents move out of the way after
+`auto_hide_delay_ms` while the layer surface itself remains unchanged. Hold the
+named XKB modifier (`Control` by default) on compositors that send modifier
+state to pointer-focused surfaces, or click, drag, or scroll the bar during the
+delay, to keep it visible until the pointer leaves.
 
 ## Building from Source
 

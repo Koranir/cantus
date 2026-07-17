@@ -14,6 +14,8 @@ pub struct GlobalUniforms {
     pub expansion_xy: Vec2,
     pub expansion_time: f32,
     pub time: f32,
+    /// Translation applied to all rendered contents without moving the surface.
+    pub content_offset: Vec2,
 }
 
 #[repr(C)]

@@ -194,6 +194,24 @@ rec {
                         default = false;
                         description = "Whether star ratings should be enabled.";
                       };
+
+                      auto_hide = mkOption {
+                        type = types.bool;
+                        default = false;
+                        description = "Whether to hide the bar while the pointer is over it.";
+                      };
+
+                      auto_hide_delay_ms = mkOption {
+                        type = types.ints.unsigned;
+                        default = 800;
+                        description = "Time in milliseconds before the bar auto-hides.";
+                      };
+
+                      auto_hide_modifier = mkOption {
+                        type = types.str;
+                        default = "Control";
+                        description = "XKB modifier name which keeps the bar visible while held.";
+                      };
                     };
                   }
                 );
@@ -212,6 +230,9 @@ rec {
                     "Pop"
                   ];
                   ratings_enabled = true;
+                  auto_hide = true;
+                  auto_hide_delay_ms = 800;
+                  auto_hide_modifier = "Control";
                 };
               };
             };

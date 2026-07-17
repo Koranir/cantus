@@ -9,12 +9,14 @@ use std::{
     ffi::c_void,
     hash::{Hash, Hasher},
     ptr::NonNull,
+    time::{Duration, Instant},
 };
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop,
     protocol::{
         wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
+        wl_keyboard::{self, WlKeyboard},
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
         wl_region::WlRegion,
@@ -36,6 +38,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 use wgpu::SurfaceTargetUnsafe;
 use wgpu::rwh::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
+use xkbcommon::xkb;
 
 pub fn run() {
     let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
@@ -110,6 +113,51 @@ struct OutputInfo {
     make_model: Option<String>,
 }
 
+#[derive(Default)]
+struct AutoHideState {
+    pointer_over_contents: bool,
+    modifier_held: bool,
+    action_suppressed: bool,
+    hide_deadline: Option<Instant>,
+}
+
+fn bounding_rects(rects: impl Iterator<Item = Rect>) -> Option<Rect> {
+    rects.reduce(|bounds, rect| {
+        Rect::new(
+            bounds.x0.min(rect.x0),
+            bounds.y0.min(rect.y0),
+            bounds.x1.max(rect.x1),
+            bounds.y1.max(rect.y1),
+        )
+    })
+}
+
+impl AutoHideState {
+    fn update_pointer(&mut self, over_contents: bool, now: Instant, delay: Duration) {
+        if over_contents && !self.pointer_over_contents {
+            self.action_suppressed = false;
+            self.hide_deadline = now.checked_add(delay);
+        } else if !over_contents {
+            self.action_suppressed = false;
+            self.hide_deadline = None;
+        }
+        self.pointer_over_contents = over_contents;
+    }
+
+    const fn suppress_for_action(&mut self) {
+        if self.pointer_over_contents {
+            self.action_suppressed = true;
+        }
+    }
+
+    fn should_hide(&self, now: Instant) -> bool {
+        self.pointer_over_contents
+            && !self.modifier_held
+            && !self.action_suppressed
+            && self.hide_deadline.is_some_and(|deadline| now >= deadline)
+    }
+}
+
 impl OutputInfo {
     fn matches(&self, target: &str) -> bool {
         [&self.name, &self.make_model, &self.description]
@@ -129,6 +177,9 @@ pub struct LayerShellApp {
     layer_shell: Option<ZwlrLayerShellV1>,
     seat: Option<WlSeat>,
     pointer: Option<WlPointer>,
+    keyboard: Option<WlKeyboard>,
+    keyboard_state: Option<xkb::State>,
+    auto_hide: AutoHideState,
     outputs: Vec<OutputInfo>,
     output_index: usize,
     last_hitbox_hash: u64,
@@ -153,6 +204,9 @@ impl LayerShellApp {
             layer_shell: None,
             seat: None,
             pointer: None,
+            keyboard: None,
+            keyboard_state: None,
+            auto_hide: AutoHideState::default(),
             outputs: Vec::new(),
             output_index: 0,
             last_hitbox_hash: 0,
@@ -173,6 +227,31 @@ impl LayerShellApp {
         {
             self.frame_callback = Some(surface.frame(qhandle, ()));
         }
+    }
+
+    fn update_auto_hide_request(&mut self) {
+        self.cantus.render.auto_hide_requested =
+            self.cantus.config.auto_hide && self.auto_hide.should_hide(Instant::now());
+    }
+
+    fn suppress_auto_hide_for_action(&mut self) {
+        self.auto_hide.suppress_for_action();
+        self.update_auto_hide_request();
+    }
+
+    fn update_pointer_position(&mut self, surface_pos: glam::Vec2) -> bool {
+        self.cantus.render.surface_mouse_pos = surface_pos;
+        self.cantus.render.uniforms.mouse_pos =
+            surface_pos - self.cantus.render.uniforms.content_offset;
+        let over_contents = self.cantus.pointer_over_contents(surface_pos);
+        self.cantus.interaction.mouse_pressure = if over_contents { 1.0 } else { 0.0 };
+        self.auto_hide.update_pointer(
+            over_contents,
+            Instant::now(),
+            Duration::from_millis(self.cantus.config.auto_hide_delay_ms),
+        );
+        self.update_auto_hide_request();
+        over_contents
     }
 
     fn ensure_surface(&mut self, width: u32, height: u32) {
@@ -211,6 +290,9 @@ impl LayerShellApp {
     }
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
+        // Frame callbacks also drive the auto-hide deadline when there are no
+        // pointer events between entering the bar and the timer expiring.
+        self.update_auto_hide_request();
         let (buffer_width, buffer_height) = self.cantus.buffer_size();
         self.ensure_surface(buffer_width, buffer_height);
 
@@ -247,8 +329,15 @@ impl LayerShellApp {
             return;
         };
         let mut hasher = DefaultHasher::new();
+        let offset = self.cantus.render.uniforms.content_offset.y;
+        let sensor_active = self.cantus.config.auto_hide && offset.abs() >= 0.5;
+        let input_bounds = self.cantus.input_bounds();
+        sensor_active.hash(&mut hasher);
         for r in self.cantus.input_rects() {
             [r.x0, r.y0, r.x1, r.y1]
+                .map(|value| value.round() as i32)
+                .hash(&mut hasher);
+            [r.x0, r.y0 + offset, r.x1, r.y1 + offset]
                 .map(|value| value.round() as i32)
                 .hash(&mut hasher);
         }
@@ -256,7 +345,33 @@ impl LayerShellApp {
 
         if hash != self.last_hitbox_hash {
             let region = compositor.create_region(qhandle, ());
-            for r in self.cantus.input_rects() {
+
+            // Once the contents start moving, use one perimeter around the
+            // whole bar. Unlike per-item rings, this has no internal edges for
+            // the pointer to cross while moving through gaps between items.
+            // The center remains a passthrough hole over the original bar.
+            if sensor_active && let Some(r) = input_bounds {
+                const REVEAL_SENSOR_PADDING: f32 = 12.0;
+                region.add(
+                    (r.x0 - REVEAL_SENSOR_PADDING).round() as i32,
+                    (r.y0 - REVEAL_SENSOR_PADDING).round() as i32,
+                    (r.x1 - r.x0 + REVEAL_SENSOR_PADDING * 2.0).round() as i32,
+                    (r.y1 - r.y0 + REVEAL_SENSOR_PADDING * 2.0).round() as i32,
+                );
+                region.subtract(
+                    r.x0.round() as i32,
+                    r.y0.round() as i32,
+                    (r.x1 - r.x0).round() as i32,
+                    (r.y1 - r.y0).round() as i32,
+                );
+            }
+
+            let translated_rects = input_bounds
+                .filter(|_| sensor_active)
+                .into_iter()
+                .chain(self.cantus.input_rects().filter(|_| !sensor_active))
+                .map(|r| r.translated_y(offset));
+            for r in translated_rects {
                 region.add(
                     r.x0.round() as i32,
                     r.y0.round() as i32,
@@ -280,6 +395,21 @@ impl CantusApp {
                 .into_iter()
                 .chain(self.icon_row_rects(track).into_iter().flatten())
         })
+    }
+
+    fn input_bounds(&self) -> Option<Rect> {
+        bounding_rects(self.input_rects())
+    }
+
+    fn pointer_over_contents(&self, surface_pos: glam::Vec2) -> bool {
+        let offset = self.render.uniforms.content_offset.y;
+        if self.config.auto_hide && offset.abs() >= 0.5 {
+            self.input_bounds()
+                .is_some_and(|rect| rect.translated_y(offset).contains(surface_pos))
+        } else {
+            self.input_rects()
+                .any(|rect| rect.translated_y(offset).contains(surface_pos))
+        }
     }
 }
 
@@ -388,6 +518,73 @@ impl Dispatch<WlSeat, ()> for LayerShellApp {
             } else if let Some(pointer) = state.pointer.take() {
                 pointer.release();
             }
+            if caps.contains(wl_seat::Capability::Keyboard) {
+                if state.keyboard.is_none() {
+                    state.keyboard = Some(proxy.get_keyboard(qhandle, ()));
+                }
+            } else if let Some(keyboard) = state.keyboard.take() {
+                keyboard.release();
+                state.keyboard_state = None;
+                state.auto_hide.modifier_held = false;
+                state.update_auto_hide_request();
+            }
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for LayerShellApp {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlKeyboard,
+        event: wl_keyboard::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_keyboard::Event::Keymap {
+                format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1),
+                fd,
+                size,
+            } => {
+                let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+                state.keyboard_state = unsafe {
+                    xkb::Keymap::new_from_fd(
+                        &context,
+                        fd,
+                        size as usize,
+                        xkb::KEYMAP_FORMAT_TEXT_V1,
+                        xkb::KEYMAP_COMPILE_NO_FLAGS,
+                    )
+                }
+                .ok()
+                .flatten()
+                .map(|keymap| xkb::State::new(&keymap));
+            }
+            wl_keyboard::Event::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                if let Some(keyboard_state) = &mut state.keyboard_state {
+                    keyboard_state.update_mask(
+                        mods_depressed,
+                        mods_latched,
+                        mods_locked,
+                        0,
+                        0,
+                        group,
+                    );
+                    state.auto_hide.modifier_held = keyboard_state.mod_name_is_active(
+                        &state.cantus.config.auto_hide_modifier,
+                        xkb::STATE_MODS_EFFECTIVE,
+                    );
+                    state.update_auto_hide_request();
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -401,9 +598,6 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        let cantus = &mut state.cantus;
-        let interaction = &mut cantus.interaction;
-
         let surface_id = state.wl_surface.as_ref().map(Proxy::id);
         match event {
             wl_pointer::Event::Enter {
@@ -412,32 +606,51 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } if surface_id == Some(surface.id()) => {
-                cantus.render.uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
-                interaction.mouse_pressure = 1.0;
+                state.update_pointer_position(vec2(surface_x as f32, surface_y as f32));
             }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                cantus.render.uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
-                cantus.handle_mouse_drag();
+                let over_contents =
+                    state.update_pointer_position(vec2(surface_x as f32, surface_y as f32));
+                if over_contents {
+                    state.cantus.handle_mouse_drag();
+                } else {
+                    state.cantus.cancel_drag();
+                }
             }
             wl_pointer::Event::Leave { .. } => {
-                interaction.mouse_pressure = 0.0;
-                cantus.cancel_drag();
+                state.cantus.interaction.mouse_pressure = 0.0;
+                state.cantus.cancel_drag();
+                // Moving the input hole is expected to produce Leave. Keep the
+                // hide request latched; entering the surrounding sensor is the
+                // signal that the pointer really moved away.
+                if !state.cantus.config.auto_hide || !state.cantus.render.auto_hide_requested {
+                    state
+                        .auto_hide
+                        .update_pointer(false, Instant::now(), Duration::ZERO);
+                    state.update_auto_hide_request();
+                }
             }
             wl_pointer::Event::Button {
                 button,
                 state: button_state,
                 ..
             } => match (button, button_state) {
-                (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => cantus.left_click(),
-                (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
-                    cantus.left_click_released();
+                (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => {
+                    state.suppress_auto_hide_for_action();
+                    state.cantus.left_click();
                 }
-                (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging => {
-                    cantus.right_click();
+                (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
+                    state.cantus.left_click_released();
+                }
+                (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed))
+                    if state.cantus.interaction.dragging =>
+                {
+                    state.suppress_auto_hide_for_action();
+                    state.cantus.right_click();
                 }
                 _ => {}
             },
@@ -450,9 +663,84 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
                 value120: discrete,
                 ..
-            } => state.cantus.handle_scroll(discrete.signum()),
+            } => {
+                state.suppress_auto_hide_for_action();
+                state.cantus.handle_scroll(discrete.signum());
+            }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AutoHideState, bounding_rects};
+    use crate::model::Rect;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn auto_hide_waits_for_deadline() {
+        let now = Instant::now();
+        let mut state = AutoHideState::default();
+        state.update_pointer(true, now, Duration::from_millis(400));
+
+        assert!(!state.should_hide(now + Duration::from_millis(399)));
+        assert!(state.should_hide(now + Duration::from_millis(400)));
+    }
+
+    #[test]
+    fn pointer_motion_does_not_restart_deadline() {
+        let now = Instant::now();
+        let mut state = AutoHideState::default();
+        state.update_pointer(true, now, Duration::from_millis(400));
+        state.update_pointer(
+            true,
+            now + Duration::from_millis(300),
+            Duration::from_millis(400),
+        );
+
+        assert!(state.should_hide(now + Duration::from_millis(400)));
+    }
+
+    #[test]
+    fn modifier_suppresses_hide_while_held() {
+        let now = Instant::now();
+        let mut state = AutoHideState::default();
+        state.update_pointer(true, now, Duration::ZERO);
+        state.modifier_held = true;
+        assert!(!state.should_hide(now));
+
+        state.modifier_held = false;
+        assert!(state.should_hide(now));
+    }
+
+    #[test]
+    fn action_suppresses_hide_until_pointer_leaves() {
+        let now = Instant::now();
+        let mut state = AutoHideState::default();
+        state.update_pointer(true, now, Duration::ZERO);
+        state.suppress_for_action();
+        assert!(!state.should_hide(now));
+
+        state.update_pointer(false, now, Duration::ZERO);
+        state.update_pointer(true, now, Duration::ZERO);
+        assert!(state.should_hide(now));
+    }
+
+    #[test]
+    fn hidden_input_bounds_include_gaps_between_items() {
+        let bounds = bounding_rects(
+            [
+                Rect::new(10.0, 20.0, 30.0, 40.0),
+                Rect::new(50.0, 15.0, 70.0, 45.0),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert!(bounds.contains(glam::vec2(40.0, 30.0)));
+        assert_eq!((bounds.x0, bounds.y0), (10.0, 15.0));
+        assert_eq!((bounds.x1, bounds.y1), (70.0, 45.0));
     }
 }
 
