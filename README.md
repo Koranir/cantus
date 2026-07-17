@@ -47,7 +47,7 @@ programs.cantus = {
     playlists = [ "Rock & Roll" "Instrumental" "Pop" ];
     ratings_enabled = true;
     auto_hide = true;
-    auto_hide_delay_ms = 400;
+    auto_hide_delay_ms = 800;
     auto_hide_modifier = "Control";
   };
 };

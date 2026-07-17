@@ -132,6 +132,17 @@ fn bounding_rects(rects: impl Iterator<Item = Rect>) -> Option<Rect> {
     })
 }
 
+const fn anchored_passthrough_rect(
+    bounds: Rect,
+    anchor: ConfigLayerAnchor,
+    surface_height: f32,
+) -> Rect {
+    match anchor {
+        ConfigLayerAnchor::Top => Rect::new(bounds.x0, 0.0, bounds.x1, bounds.y1),
+        ConfigLayerAnchor::Bottom => Rect::new(bounds.x0, bounds.y0, bounds.x1, surface_height),
+    }
+}
+
 impl AutoHideState {
     fn update_pointer(&mut self, over_contents: bool, now: Instant, delay: Duration) {
         if over_contents && !self.pointer_over_contents {
@@ -349,7 +360,8 @@ impl LayerShellApp {
             // Once the contents start moving, use one perimeter around the
             // whole bar. Unlike per-item rings, this has no internal edges for
             // the pointer to cross while moving through gaps between items.
-            // The center remains a passthrough hole over the original bar.
+            // The center remains a passthrough hole over the original bar and
+            // extends toward the anchored edge, where the contents disappear.
             if sensor_active && let Some(r) = input_bounds {
                 const REVEAL_SENSOR_PADDING: f32 = 12.0;
                 region.add(
@@ -358,11 +370,16 @@ impl LayerShellApp {
                     (r.x1 - r.x0 + REVEAL_SENSOR_PADDING * 2.0).round() as i32,
                     (r.y1 - r.y0 + REVEAL_SENSOR_PADDING * 2.0).round() as i32,
                 );
+                let passthrough = anchored_passthrough_rect(
+                    r,
+                    self.cantus.config.layer_anchor,
+                    self.cantus.logical_surface_size().1,
+                );
                 region.subtract(
-                    r.x0.round() as i32,
-                    r.y0.round() as i32,
-                    (r.x1 - r.x0).round() as i32,
-                    (r.y1 - r.y0).round() as i32,
+                    passthrough.x0.round() as i32,
+                    passthrough.y0.round() as i32,
+                    (passthrough.x1 - passthrough.x0).round() as i32,
+                    (passthrough.y1 - passthrough.y0).round() as i32,
                 );
             }
 
@@ -674,8 +691,8 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{AutoHideState, bounding_rects};
-    use crate::model::Rect;
+    use super::{AutoHideState, anchored_passthrough_rect, bounding_rects};
+    use crate::{config::LayerAnchor, model::Rect};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -741,6 +758,20 @@ mod tests {
         assert!(bounds.contains(glam::vec2(40.0, 30.0)));
         assert_eq!((bounds.x0, bounds.y0), (10.0, 15.0));
         assert_eq!((bounds.x1, bounds.y1), (70.0, 45.0));
+    }
+
+    #[test]
+    fn passthrough_extends_toward_layer_anchor() {
+        let bounds = Rect::new(10.0, 20.0, 70.0, 45.0);
+
+        let top = anchored_passthrough_rect(bounds, LayerAnchor::Top, 100.0);
+        assert_eq!((top.x0, top.y0, top.x1, top.y1), (10.0, 0.0, 70.0, 45.0));
+
+        let bottom = anchored_passthrough_rect(bounds, LayerAnchor::Bottom, 100.0);
+        assert_eq!(
+            (bottom.x0, bottom.y0, bottom.x1, bottom.y1),
+            (10.0, 20.0, 70.0, 100.0)
+        );
     }
 }
 
