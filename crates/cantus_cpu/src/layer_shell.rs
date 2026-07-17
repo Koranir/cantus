@@ -145,20 +145,12 @@ const fn extend_rect_to_anchor(
 
 const fn anchor_sensor_corridor(
     bounds: Rect,
-    padding: f32,
     anchor: ConfigLayerAnchor,
     surface_height: f32,
 ) -> Rect {
     match anchor {
-        ConfigLayerAnchor::Top => {
-            Rect::new(bounds.x0 - padding, 0.0, bounds.x1 + padding, bounds.y0)
-        }
-        ConfigLayerAnchor::Bottom => Rect::new(
-            bounds.x0 - padding,
-            bounds.y1,
-            bounds.x1 + padding,
-            surface_height,
-        ),
+        ConfigLayerAnchor::Top => Rect::new(bounds.x0, 0.0, bounds.x1, bounds.y0),
+        ConfigLayerAnchor::Bottom => Rect::new(bounds.x0, bounds.y1, bounds.x1, surface_height),
     }
 }
 
@@ -172,6 +164,10 @@ const fn at_anchored_edge(y: f32, anchor: ConfigLayerAnchor, surface_height: f32
 
 const fn auto_hide_pointer_target(over_translated_contents: bool, at_anchor_edge: bool) -> bool {
     over_translated_contents || at_anchor_edge
+}
+
+const fn anchored_edge_hide_target(at_anchor_edge: bool, over_bar_projection: bool) -> bool {
+    at_anchor_edge && over_bar_projection
 }
 
 impl AutoHideState {
@@ -292,18 +288,22 @@ impl LayerShellApp {
         self.cantus.render.surface_mouse_pos = surface_pos;
         self.cantus.render.uniforms.mouse_pos =
             surface_pos - self.cantus.render.uniforms.content_offset;
-        let at_anchor_edge = self.cantus.config.auto_hide
-            && at_anchored_edge(
-                surface_pos.y,
-                self.cantus.config.layer_anchor,
-                self.cantus.logical_surface_size().1,
+        let at_anchor_edge = at_anchored_edge(
+            surface_pos.y,
+            self.cantus.config.layer_anchor,
+            self.cantus.logical_surface_size().1,
+        );
+        let edge_hide_target = self.cantus.config.auto_hide
+            && anchored_edge_hide_target(
+                at_anchor_edge,
+                self.cantus.pointer_over_anchored_contents(surface_pos),
             );
         // Once the anchored edge starts hiding the bar, translated contents
         // move away from the pointer. Keep edge motion classified as active so
         // those events cannot reverse and restart the animation.
         let over_contents = auto_hide_pointer_target(
             self.cantus.pointer_over_contents(surface_pos),
-            at_anchor_edge,
+            edge_hide_target,
         );
         self.cantus.interaction.mouse_pressure = if over_contents { 1.0 } else { 0.0 };
         let now = Instant::now();
@@ -312,7 +312,7 @@ impl LayerShellApp {
             now,
             Duration::from_millis(self.cantus.config.auto_hide_delay_ms),
         );
-        if at_anchor_edge {
+        if edge_hide_target {
             self.auto_hide.hide_now(now);
         }
         self.update_auto_hide_request();
@@ -414,9 +414,9 @@ impl LayerShellApp {
             // Once the contents start moving, use one perimeter around the
             // whole bar. Unlike per-item rings, this has no internal edges for
             // the pointer to cross while moving through gaps between items.
-            // The center remains a passthrough hole over the original bar. A
-            // full-width corridor removes both anchor-side corners so moving
-            // along that edge cannot repeatedly enter the reveal sensor.
+            // The center remains a passthrough hole over the original bar. Its
+            // anchor-facing corridor leaves the padded corners active so they
+            // can detect a pointer crossing either horizontal bar boundary.
             if sensor_active && let Some(r) = input_bounds {
                 const REVEAL_SENSOR_PADDING: f32 = 12.0;
                 region.add(
@@ -427,7 +427,6 @@ impl LayerShellApp {
                 );
                 let anchor_corridor = anchor_sensor_corridor(
                     r,
-                    REVEAL_SENSOR_PADDING,
                     self.cantus.config.layer_anchor,
                     self.cantus.logical_surface_size().1,
                 );
@@ -485,6 +484,11 @@ impl CantusApp {
         let surface_height = self.logical_surface_size().1;
         self.input_rects()
             .map(move |rect| extend_rect_to_anchor(rect, anchor, surface_height))
+    }
+
+    fn pointer_over_anchored_contents(&self, surface_pos: glam::Vec2) -> bool {
+        self.anchored_input_rects()
+            .any(|rect| rect.contains(surface_pos))
     }
 
     fn pointer_over_contents(&self, surface_pos: glam::Vec2) -> bool {
@@ -761,8 +765,8 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        AutoHideState, anchor_sensor_corridor, at_anchored_edge, auto_hide_pointer_target,
-        bounding_rects, extend_rect_to_anchor,
+        AutoHideState, anchor_sensor_corridor, anchored_edge_hide_target, at_anchored_edge,
+        auto_hide_pointer_target, bounding_rects, extend_rect_to_anchor,
     };
     use crate::{config::LayerAnchor, model::Rect};
     use std::time::{Duration, Instant};
@@ -815,6 +819,18 @@ mod tests {
 
         assert!(state.should_hide(later));
         assert_eq!(state.hide_deadline, Some(now));
+    }
+
+    #[test]
+    fn leaving_bar_projection_at_anchor_edge_releases_hide() {
+        assert!(anchored_edge_hide_target(true, true));
+        assert!(!anchored_edge_hide_target(true, false));
+
+        let now = Instant::now();
+        let mut state = AutoHideState::default();
+        state.update_pointer(true, now, Duration::ZERO);
+        state.update_pointer(false, now + Duration::from_millis(100), Duration::ZERO);
+        assert!(!state.should_hide(now + Duration::from_millis(100)));
     }
 
     #[test]
@@ -881,19 +897,19 @@ mod tests {
     }
 
     #[test]
-    fn hidden_sensor_has_no_anchor_side_corners() {
+    fn hidden_sensor_keeps_anchor_side_exit_targets() {
         let bounds = Rect::new(10.0, 20.0, 70.0, 45.0);
 
-        let top = anchor_sensor_corridor(bounds, 12.0, LayerAnchor::Top, 100.0);
-        assert_eq!((top.x0, top.y0, top.x1, top.y1), (-2.0, 0.0, 82.0, 20.0));
-        assert!(!top.contains(glam::vec2(0.0, 30.0)));
+        let top = anchor_sensor_corridor(bounds, LayerAnchor::Top, 100.0);
+        assert_eq!((top.x0, top.y0, top.x1, top.y1), (10.0, 0.0, 70.0, 20.0));
+        assert!(!top.contains(glam::vec2(5.0, 0.0)));
 
-        let bottom = anchor_sensor_corridor(bounds, 12.0, LayerAnchor::Bottom, 100.0);
+        let bottom = anchor_sensor_corridor(bounds, LayerAnchor::Bottom, 100.0);
         assert_eq!(
             (bottom.x0, bottom.y0, bottom.x1, bottom.y1),
-            (-2.0, 45.0, 82.0, 100.0)
+            (10.0, 45.0, 70.0, 100.0)
         );
-        assert!(!bottom.contains(glam::vec2(0.0, 30.0)));
+        assert!(!bottom.contains(glam::vec2(75.0, 100.0)));
     }
 }
 
