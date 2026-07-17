@@ -35,9 +35,25 @@ const DEFAULT_AUDIO_FEATURES: PackedAudioFeatures =
 const PLAYHEAD_START_DURATION: f32 = 0.7;
 const PLAYHEAD_TRANSITION_SPEED: f32 = 5.5;
 const DETAIL_FADE_DURATION: f32 = 0.2;
+const MIN_NATURAL_TRACK_WIDTH: f32 = 8.0;
 
 const fn flag(value: bool) -> f32 {
     if value { 1.0 } else { 0.0 }
+}
+
+fn expand_narrow_track(start_x: f32, width: f32, min_x: f32, max_x: f32) -> (f32, f32) {
+    if width <= 0.0 || width >= MIN_NATURAL_TRACK_WIDTH {
+        return (start_x, width);
+    }
+
+    let expanded_width = MIN_NATURAL_TRACK_WIDTH.min(max_x - min_x);
+    let center_x = start_x + width * 0.5;
+    let expanded_start = (center_x - expanded_width * 0.5).clamp(min_x, max_x - expanded_width);
+    (expanded_start, expanded_width)
+}
+
+fn ends_album_run(current_image: Option<&str>, next_image: Option<&str>) -> bool {
+    current_image.is_none_or(|current| next_image != Some(current))
 }
 
 fn layout_tracks(queue: &mut [Track], config: &Config, current_ms: f32) {
@@ -51,6 +67,7 @@ fn layout_tracks(queue: &mut [Track], config: &Config, current_ms: f32) {
     let mut queue_offset = 0.0;
 
     for track in &mut *queue {
+        track.runtime.compact = false;
         track.runtime.width = 0.0;
         let start_ms = current_ms + queue_offset;
         queue_offset += track.queue_span_ms();
@@ -64,12 +81,20 @@ fn layout_tracks(queue: &mut [Track], config: &Config, current_ms: f32) {
         runtime.start_ms = start_ms;
         if natural_end >= history_width + height {
             runtime.start_x = natural_start.max(history_width);
-            runtime.width = natural_end.min(timeline_end_x) - runtime.start_x;
+            runtime.width = (natural_end.min(timeline_end_x) - runtime.start_x).max(0.0);
+            (runtime.start_x, runtime.width) = expand_narrow_track(
+                runtime.start_x,
+                runtime.width,
+                history_width,
+                timeline_end_x,
+            );
         } else if natural_end >= history_width {
             transition = (history_width + height - natural_end) / height;
+            runtime.compact = true;
             runtime.start_x = natural_end - height;
             runtime.width = height;
         } else {
+            runtime.compact = true;
             compact_count += 1;
         }
     }
@@ -467,10 +492,17 @@ impl CantusApp {
             if self.render.pills.len() == MAX_RENDER_INSTANCES {
                 break;
             }
+            let album_run_ends = ends_album_run(
+                playback_state.queue[queue_index].album.image.as_deref(),
+                playback_state
+                    .queue
+                    .get(queue_index + 1)
+                    .and_then(|track| track.album.image.as_deref()),
+            );
             let track = &mut playback_state.queue[queue_index];
             if track.runtime.rect(self.config.height).is_some() {
                 let hovered = Some(queue_index) == hovered_track;
-                self.draw_track(track, playhead_x, hovered, dt, playlists);
+                self.draw_track(track, playhead_x, hovered, dt, playlists, album_run_ends);
             }
         }
 
@@ -519,6 +551,7 @@ impl CantusApp {
         hovered: bool,
         dt: f32,
         playlists: &[CondensedPlaylist],
+        album_run_ends: bool,
     ) {
         let width = track.runtime.width;
         let start_x = track.runtime.start_x;
@@ -533,12 +566,17 @@ impl CantusApp {
 
         let image_index = self.get_image_index(&track.art);
         let colors = track.palette();
-        let show_details = width > self.config.height;
+        let show_details = !track.runtime.compact;
         approach(
             &mut track.runtime.detail_alpha,
-            flag(width >= self.config.height),
+            flag(show_details),
             dt / DETAIL_FADE_DURATION,
         );
+        if show_details {
+            track.runtime.marquee_time += dt;
+        } else {
+            track.runtime.marquee_time = 0.0;
+        }
         let detail_alpha = track.runtime.detail_alpha;
         approach(
             &mut track.runtime.playlist_expansion,
@@ -549,12 +587,14 @@ impl CantusApp {
         let audio_features = track
             .audio_features
             .map_or(DEFAULT_AUDIO_FEATURES, AudioFeatures::packed);
+        let show_album_art = album_run_ends
+            && TextRenderer::shows_album_art(width, self.config.height, show_details);
         let mut pill = BackgroundPill {
             x: start_x,
             width,
             colors,
-            alpha: detail_alpha,
-            image_index,
+            alpha: 1.0,
+            image_index: if show_album_art { image_index } else { -1 },
             rating: -1,
             audio_features,
             playlist_images: [-1; MAX_PILL_PLAYLIST_ICONS],
@@ -565,8 +605,13 @@ impl CantusApp {
             && detail_alpha > 0.0
             && let Some(gpu) = &mut self.render.gpu
         {
-            gpu.text_renderer
-                .render(&gpu.queue, track, detail_alpha, self.render.scale);
+            gpu.text_renderer.render(
+                &gpu.queue,
+                track,
+                detail_alpha,
+                show_album_art,
+                self.render.scale,
+            );
         }
 
         // Expand the hitbox vertically so it includes the playlist buttons
@@ -713,5 +758,33 @@ impl CantusApp {
             approach(&mut self.render.playhead.icon_presence, show_icon, speed);
             approach(&mut self.render.playhead.icon_morph, play_icon, speed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn narrow_tracks_expand_around_their_natural_center() {
+        let (start_x, width) = expand_narrow_track(100.0, 2.0, 0.0, 200.0);
+
+        assert!((start_x - 97.0).abs() < f32::EPSILON);
+        assert!((width - MIN_NATURAL_TRACK_WIDTH).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn narrow_tracks_stay_inside_the_timeline() {
+        let (start_x, width) = expand_narrow_track(0.0, 2.0, 0.0, 200.0);
+
+        assert!(start_x.abs() < f32::EPSILON);
+        assert!((width - MIN_NATURAL_TRACK_WIDTH).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn only_the_last_track_in_an_album_run_shows_art() {
+        assert!(!ends_album_run(Some("album-a"), Some("album-a")));
+        assert!(ends_album_run(Some("album-a"), Some("album-b")));
+        assert!(ends_album_run(Some("album-a"), None));
     }
 }
