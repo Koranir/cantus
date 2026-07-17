@@ -135,13 +135,29 @@ pub struct TrackRuntime {
     pub compact: bool,
     pub playlist_expansion: f32,
     pub detail_alpha: f32,
-    pub marquee_time: f32,
+    pub marquee: MarqueeRuntime,
     pub primary_icon_alpha: f32,
     pub primary_playlist_count: u8,
     pub secondary_playlist_count: u8,
     pub start_ms: f32,
     pub start_x: f32,
     pub width: f32,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+pub enum MarqueePhase {
+    #[default]
+    StartPause,
+    Forward,
+    EndPause,
+    Backward,
+}
+
+#[derive(Default)]
+pub struct MarqueeRuntime {
+    pub phase: MarqueePhase,
+    pub elapsed: f32,
+    pub start: f32,
 }
 
 impl Track {
@@ -167,6 +183,12 @@ impl Track {
 }
 
 impl TrackRuntime {
+    pub const fn reset_marquee(&mut self) {
+        self.marquee.phase = MarqueePhase::StartPause;
+        self.marquee.elapsed = 0.0;
+        self.marquee.start = 0.0;
+    }
+
     pub fn end_x(&self) -> f32 {
         self.start_x + self.width
     }
