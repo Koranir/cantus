@@ -135,7 +135,7 @@ mod tests {
     fn auto_hide_defaults_are_backwards_compatible() {
         let config: Config = toml::from_str("").unwrap();
         assert!(!config.auto_hide);
-        assert_eq!(config.auto_hide_delay_ms, 400);
+        assert_eq!(config.auto_hide_delay_ms, 800);
         assert_eq!(config.auto_hide_modifier, "Control");
     }
 
