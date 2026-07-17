@@ -19,7 +19,7 @@ pub fn vs_text(
          MAX_GLYPH_INSTANCES],
     #[spirv(position)] out_pos: &mut Vec4,
     #[spirv(location = 0)] out_uv: &mut Vec2,
-    #[spirv(location = 1)] out_fade: &mut Vec2,
+    #[spirv(location = 1)] out_fade: &mut Vec4,
 ) {
     let glyph = glyphs[i_idx as usize];
     let unit = quad_coord(v_idx);
@@ -29,18 +29,25 @@ pub fn vs_text(
 
     *out_pos = pixel_to_ndc(pixel_pos, global.screen_size);
     *out_uv = (atlas_min + unit * (atlas_max - atlas_min)) / GLYPH_ATLAS_SIZE as f32;
-    *out_fade = Vec2::new(glyph.clip_right - pixel_pos.x, glyph.alpha);
+    *out_fade = Vec4::new(
+        pixel_pos.x - glyph.clip_left,
+        glyph.clip_right - pixel_pos.x,
+        glyph.alpha,
+        glyph.fade_width,
+    );
 }
 
 #[spirv(fragment)]
 pub fn fs_text(
     #[spirv(location = 0)] uv: Vec2,
-    #[spirv(location = 1)] fade: Vec2,
+    #[spirv(location = 1)] fade: Vec4,
     #[spirv(descriptor_set = 0, binding = 2)] atlas: &Image2d,
     #[spirv(descriptor_set = 0, binding = 3)] sampler: &Sampler,
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
-    let alpha = atlas.sample(*sampler, uv).x * fade.y * smoothstep(0.0, 8.0, fade.x);
+    let edge_fade =
+        smoothstep(0.0, fade.w, fade.x) * smoothstep(0.0, fade.w, fade.y);
+    let alpha = atlas.sample(*sampler, uv).x * fade.z * edge_fade;
     if alpha <= 0.0 {
         kill();
     }

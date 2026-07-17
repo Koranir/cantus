@@ -132,8 +132,10 @@ pub struct Track {
 
 #[derive(Default)]
 pub struct TrackRuntime {
+    pub compact: bool,
     pub playlist_expansion: f32,
     pub detail_alpha: f32,
+    pub marquee_time: f32,
     pub primary_icon_alpha: f32,
     pub primary_playlist_count: u8,
     pub secondary_playlist_count: u8,

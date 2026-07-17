@@ -118,9 +118,12 @@ pub struct GlyphInstance {
     pub size: Vec2,
     /// Packed top-left and bottom-right atlas coordinates.
     pub atlas: [u32; 2],
-    /// Right clip edge in logical pixels.
+    /// Horizontal clip edges in logical pixels.
+    pub clip_left: f32,
     pub clip_right: f32,
     pub alpha: f32,
+    /// Width of the soft clipping edge in logical pixels.
+    pub fade_width: f32,
 }
 
 pub const GLYPH_ATLAS_SIZE: u32 = 2048;
@@ -252,4 +255,15 @@ pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 
 pub fn approach(current: &mut f32, target: f32, speed: f32) {
     *current += (target - *current).clamp(-speed, speed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GlyphInstance;
+    use core::mem::size_of;
+
+    #[test]
+    fn glyph_instance_has_a_valid_storage_array_stride() {
+        assert_eq!(size_of::<GlyphInstance>(), 40);
+    }
 }

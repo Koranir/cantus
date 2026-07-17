@@ -10,6 +10,14 @@ use wgpu::{
 
 const FONT_SIZE: f32 = 16.0;
 const FONT_SIZE_SMALL: f32 = 14.0;
+const TEXT_PADDING: f32 = 12.0;
+const ART_GAP: f32 = 8.0;
+const MIN_TITLE_WIDTH_WITH_ART: f32 = 80.0;
+const MIN_METADATA_TRACK_WIDTH: f32 = 24.0;
+const MARQUEE_SPEED: f32 = 8.0;
+const MARQUEE_PAUSE: f32 = 1.5;
+const NO_CLIP_LEFT: f32 = -1_000_000.0;
+const NO_CLIP_RIGHT: f32 = 1_000_000.0;
 
 /// Size of the glyph atlas texture (square, in pixels).
 const ATLAS_PADDING: u32 = 1;
@@ -139,9 +147,27 @@ impl TextRenderer {
         Some(entry)
     }
 
-    pub fn render(&mut self, queue: &Queue, track: &Track, alpha: f32, render_scale: f32) {
-        let text_start_left = track.runtime.start_x + 12.0;
-        let text_start_right = track.runtime.end_x() - self.panel_height - 8.0;
+    pub fn shows_album_art(track_width: f32, panel_height: f32, show_details: bool) -> bool {
+        !show_details
+            || track_width - panel_height - TEXT_PADDING - ART_GAP >= MIN_TITLE_WIDTH_WITH_ART
+    }
+
+    pub fn render(
+        &mut self,
+        queue: &Queue,
+        track: &Track,
+        alpha: f32,
+        show_album_art: bool,
+        render_scale: f32,
+    ) {
+        let text_padding = text_padding(track.runtime.width);
+        let text_start_left = track.runtime.start_x + text_padding;
+        let trailing_space = if show_album_art {
+            self.panel_height + ART_GAP
+        } else {
+            text_padding
+        };
+        let text_start_right = track.runtime.end_x() - trailing_space;
         let available_width = text_start_right - text_start_left;
 
         if available_width <= 0.0 {
@@ -163,20 +189,32 @@ impl TextRenderer {
         } else {
             song_name
         };
-        let top_y = PANEL_START + (self.panel_height * 0.26).floor();
+        let title_only = track.runtime.width < MIN_METADATA_TRACK_WIDTH;
+        let title_height = if title_only { 0.45 } else { 0.26 };
+        let top_y = PANEL_START + (self.panel_height * title_height).floor();
         let bottom_y = PANEL_START + (self.panel_height * 0.57).floor();
 
         let measured_width = measure_text(&self.font, song_name, FONT_SIZE);
 
-        let width_ratio = available_width / measured_width;
-        let (x, size, align) = if width_ratio <= 1.0 {
+        let title_overflow = (measured_width - available_width).max(0.0);
+        let (x, align, clip) = if title_overflow > 0.0 {
+            let offset = marquee_offset(track.runtime.marquee_time, title_overflow);
+            let clip_left = if offset > 0.5 {
+                text_start_left
+            } else {
+                NO_CLIP_LEFT
+            };
             (
-                text_start_left,
-                FONT_SIZE * width_ratio.max(0.8),
+                text_start_left - offset,
                 Align::Left,
+                Some((
+                    clip_left,
+                    text_start_right,
+                    edge_fade_width(available_width),
+                )),
             )
         } else {
-            (text_start_right, FONT_SIZE, Align::Right)
+            (text_start_right, Align::Right, None)
         };
 
         let seconds_until_start = (track.runtime.start_ms / 1000.0).abs();
@@ -197,7 +235,7 @@ impl TextRenderer {
             )
         });
 
-        let mut queue_text = |text, width, origin, size, align| {
+        let mut queue_text = |text, width, origin, size, align, clip| {
             self.queue_glyphs(
                 queue,
                 text,
@@ -206,17 +244,22 @@ impl TextRenderer {
                 size,
                 align,
                 alpha,
-                text_start_right,
+                clip,
                 render_scale,
             );
         };
         queue_text(
             song_name,
-            measured_width * size / FONT_SIZE,
+            measured_width,
             vec2(x, top_y),
-            size,
+            FONT_SIZE,
             align,
+            clip,
         );
+
+        if title_only {
+            return;
+        }
 
         if let Some((time_width, artist_width)) = split_widths {
             queue_text(
@@ -225,6 +268,7 @@ impl TextRenderer {
                 vec2(text_start_left, bottom_y),
                 FONT_SIZE_SMALL,
                 Align::Left,
+                None,
             );
             queue_text(
                 &track.artist.name,
@@ -232,6 +276,7 @@ impl TextRenderer {
                 vec2(text_start_right, bottom_y),
                 FONT_SIZE_SMALL,
                 Align::Right,
+                None,
             );
         } else {
             let (x, align) = if bottom_ratio >= 1.0 {
@@ -246,6 +291,11 @@ impl TextRenderer {
                 vec2(x, bottom_y),
                 size,
                 align,
+                (bottom_ratio < 1.0).then_some((
+                    NO_CLIP_LEFT,
+                    text_start_right,
+                    edge_fade_width(available_width),
+                )),
             );
         }
     }
@@ -259,11 +309,11 @@ impl TextRenderer {
         px_size: f32,
         align: Align,
         alpha: f32,
-        clip_right: f32,
+        clip: Option<(f32, f32, f32)>,
         render_scale: f32,
     ) {
         let scaled_font = self.font.as_scaled(px_size);
-        let baseline_offset = (scaled_font.ascent() + scaled_font.descent()) * 0.5;
+        let baseline_offset = scaled_font.ascent().midpoint(scaled_font.descent());
 
         let caret = match align {
             Align::Left => origin.x,
@@ -274,10 +324,8 @@ impl TextRenderer {
             .round()
             .max(SCALE_STEPS) as u16;
         let glyph_scale = px_size / (FONT_SIZE * render_scale);
-        let clip_right = match align {
-            Align::Left if total_width - (clip_right - origin.x) > 0.5 / render_scale => clip_right,
-            _ => f32::MAX,
-        };
+        let (clip_left, clip_right, fade_width) =
+            clip.unwrap_or((NO_CLIP_LEFT, NO_CLIP_RIGHT, 1.0));
         let baseline_y = origin.y + baseline_offset;
 
         let font = self.font.clone();
@@ -302,11 +350,46 @@ impl TextRenderer {
                     pack_u16x2(glyph.pos),
                     pack_u16x2([glyph.pos[0] + glyph.size[0], glyph.pos[1] + glyph.size[1]]),
                 ],
+                clip_left,
                 clip_right,
                 alpha,
+                fade_width,
             });
         }
     }
+}
+
+fn marquee_offset(elapsed: f32, overflow: f32) -> f32 {
+    if overflow <= 0.0 {
+        return 0.0;
+    }
+
+    let travel_time = overflow / MARQUEE_SPEED;
+    let cycle = MARQUEE_PAUSE * 2.0 + travel_time * 2.0;
+    let phase = elapsed.rem_euclid(cycle);
+    if phase < MARQUEE_PAUSE {
+        0.0
+    } else if phase < MARQUEE_PAUSE + travel_time {
+        let progress = (phase - MARQUEE_PAUSE) / travel_time;
+        overflow * ease_in_out(progress)
+    } else if phase < MARQUEE_PAUSE * 2.0 + travel_time {
+        overflow
+    } else {
+        let progress = (phase - MARQUEE_PAUSE * 2.0 - travel_time) / travel_time;
+        overflow * (1.0 - ease_in_out(progress))
+    }
+}
+
+fn ease_in_out(progress: f32) -> f32 {
+    progress * progress * (3.0 - 2.0 * progress)
+}
+
+fn edge_fade_width(available_width: f32) -> f32 {
+    (available_width * 0.15).clamp(1.5, 5.0)
+}
+
+fn text_padding(track_width: f32) -> f32 {
+    (track_width * 0.2).clamp(1.0, TEXT_PADDING)
 }
 
 #[derive(Copy, Clone)]
@@ -339,4 +422,48 @@ fn layout_glyphs<'a>(
         previous = Some(glyph_id);
         (glyph_id, start, caret)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn album_art_yields_to_the_title_on_narrow_tracks() {
+        assert!(TextRenderer::shows_album_art(50.0, 50.0, false));
+        assert!(!TextRenderer::shows_album_art(149.0, 50.0, true));
+        assert!(TextRenderer::shows_album_art(150.0, 50.0, true));
+    }
+
+    #[test]
+    fn tiny_tracks_keep_some_title_viewport() {
+        let track_width = 8.0;
+        let available_width = track_width - text_padding(track_width) * 2.0;
+
+        assert!(available_width >= 4.0);
+    }
+
+    #[test]
+    fn marquee_pauses_and_scrolls_in_both_directions() {
+        let overflow = 48.0;
+        let travel_time = overflow / MARQUEE_SPEED;
+        let close_to = |actual: f32, expected: f32| {
+            assert!((actual - expected).abs() < 0.001);
+        };
+
+        close_to(marquee_offset(0.0, overflow), 0.0);
+        close_to(
+            marquee_offset(MARQUEE_PAUSE + travel_time / 2.0, overflow),
+            overflow / 2.0,
+        );
+        close_to(
+            marquee_offset(MARQUEE_PAUSE + travel_time + 0.5, overflow),
+            overflow,
+        );
+        close_to(
+            marquee_offset(MARQUEE_PAUSE * 2.0 + travel_time * 1.5, overflow),
+            overflow / 2.0,
+        );
+        assert!(marquee_offset(MARQUEE_PAUSE + travel_time * 0.25, overflow) < overflow * 0.25);
+    }
 }
